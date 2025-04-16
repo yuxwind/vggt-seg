@@ -124,9 +124,11 @@ class Aggregator(nn.Module):
         # The same applies for register tokens
         self.camera_token = nn.Parameter(torch.randn(1, 2, 1, embed_dim))
         self.register_token = nn.Parameter(torch.randn(1, 2, num_register_tokens, embed_dim))
+        #self.seg_token = nn.Parameter(torch.randn(1, 1, 1, embed_dim))
 
         # The patch tokens start after the camera and register tokens
         self.patch_start_idx = 1 + num_register_tokens
+        #self.patch_start_idx = 2 + num_register_tokens
 
         # Initialize parameters with small values
         nn.init.normal_(self.camera_token, std=1e-6)
@@ -218,9 +220,11 @@ class Aggregator(nn.Module):
         # Expand camera and register tokens to match batch size and sequence length
         camera_token = slice_expand_and_flatten(self.camera_token, B, S)
         register_token = slice_expand_and_flatten(self.register_token, B, S)
+        #seg_token = self.register_token[0,1:2,0:1,:].expand([B, S, *self.camera_token.shape[2:]]).view(B*S, *self.camera_token.shape[2:])
 
         # Concatenate special tokens with patch tokens
         tokens = torch.cat([camera_token, register_token, patch_tokens], dim=1)
+        #tokens = torch.cat([camera_token, register_token, seg_token, patch_tokens], dim=1)
 
         pos = None
         if self.rope is not None:
@@ -257,7 +261,6 @@ class Aggregator(nn.Module):
                 # concat frame and global intermediates, [B x S x P x 2C]
                 concat_inter = torch.cat([frame_intermediates[i], global_intermediates[i]], dim=-1)
                 output_list.append(concat_inter)
-
         del concat_inter
         del frame_intermediates
         del global_intermediates

@@ -148,3 +148,16 @@ skyseg.onnx
 # pixi environments
 .pixi
 *.egg-info
+
+
+# local files
+.vscode/
+checkpoints/
+colmap_output/
+demo_mesh.py
+exps/
+modules/
+representations/
+structured_latent_vae/
+yuantao/
+vggt/utils/random_utils.py
