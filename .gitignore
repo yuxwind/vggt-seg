@@ -161,3 +161,4 @@ representations/
 structured_latent_vae/
 yuantao/
 vggt/utils/random_utils.py
+track_visuals/

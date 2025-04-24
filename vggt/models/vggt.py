@@ -12,6 +12,7 @@ from vggt.models.aggregator import Aggregator
 from vggt.heads.camera_head import CameraHead
 from vggt.heads.dpt_head import DPTHead
 from vggt.heads.track_head import TrackHead
+from vggt.heads.seg_head import SegHead
 
 
 class VGGT(nn.Module, PyTorchModelHubMixin):
@@ -23,6 +24,8 @@ class VGGT(nn.Module, PyTorchModelHubMixin):
         self.point_head = DPTHead(dim_in=2 * embed_dim, output_dim=4, activation="inv_log", conf_activation="expp1")
         self.depth_head = DPTHead(dim_in=2 * embed_dim, output_dim=2, activation="exp", conf_activation="expp1")
         self.track_head = TrackHead(dim_in=2 * embed_dim, patch_size=patch_size)
+        # TODO: dim_in=2 * embed_dim when using frame_seg
+        self.seg_head   = SegHead(dim_in=embed_dim, patch_size=patch_size, dim_mask=128, num_classes=150)                                 
 
     def forward(
         self,
@@ -60,7 +63,7 @@ class VGGT(nn.Module, PyTorchModelHubMixin):
         if query_points is not None and len(query_points.shape) == 2:
             query_points = query_points.unsqueeze(0)
 
-        aggregated_tokens_list, patch_start_idx = self.aggregator(images)
+        aggregated_tokens_list, patch_start_idx, aggregated_segs_list = self.aggregator(images)
 
         predictions = {}
 
@@ -82,6 +85,13 @@ class VGGT(nn.Module, PyTorchModelHubMixin):
                 )
                 predictions["world_points"] = pts3d
                 predictions["world_points_conf"] = pts3d_conf
+
+            if self.seg_head is not None:
+                seg_prediction = self.seg_head(
+                    aggregated_tokens_list, images=images, patch_start_idx=patch_start_idx, seg_token=aggregated_tokens_list
+                )
+                predictions['pred_logits'] = seg_prediction['pred_logits']
+                predictions['pred_masks']  = seg_prediction['pred_masks']
 
         if self.track_head is not None and query_points is not None:
             track_list, vis, conf = self.track_head(

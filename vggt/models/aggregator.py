@@ -124,11 +124,13 @@ class Aggregator(nn.Module):
         # The same applies for register tokens
         self.camera_token = nn.Parameter(torch.randn(1, 2, 1, embed_dim))
         self.register_token = nn.Parameter(torch.randn(1, 2, num_register_tokens, embed_dim))
-        #self.seg_token = nn.Parameter(torch.randn(1, 1, 1, embed_dim))
+        
+        # 20250416: Add seg_token
+        self.N_seg_token = 100
+        self.seg_token = nn.Parameter(torch.randn(1, self.N_seg_token, embed_dim))
 
         # The patch tokens start after the camera and register tokens
         self.patch_start_idx = 1 + num_register_tokens
-        #self.patch_start_idx = 2 + num_register_tokens
 
         # Initialize parameters with small values
         nn.init.normal_(self.camera_token, std=1e-6)
@@ -220,11 +222,9 @@ class Aggregator(nn.Module):
         # Expand camera and register tokens to match batch size and sequence length
         camera_token = slice_expand_and_flatten(self.camera_token, B, S)
         register_token = slice_expand_and_flatten(self.register_token, B, S)
-        #seg_token = self.register_token[0,1:2,0:1,:].expand([B, S, *self.camera_token.shape[2:]]).view(B*S, *self.camera_token.shape[2:])
 
         # Concatenate special tokens with patch tokens
         tokens = torch.cat([camera_token, register_token, patch_tokens], dim=1)
-        #tokens = torch.cat([camera_token, register_token, seg_token, patch_tokens], dim=1)
 
         pos = None
         if self.rope is not None:
@@ -237,22 +237,34 @@ class Aggregator(nn.Module):
             pos_special = torch.zeros(B * S, self.patch_start_idx, 2).to(images.device).to(pos.dtype)
             pos = torch.cat([pos_special, pos], dim=1)
 
+        # Add semantic segmantation tokens 
+        # NOTE: maskformer adds self.seg_token for each transformer layer,
+        #       vggt adds self.camera_token only once. 
+        #       For now, I follow self.camera_token and adds self.seg_token onces 
+        # TODO: try adds self.seg_token for each transformer layer. 
+        seg_token = self.seg_token.expand([B, *self.seg_token.shape[1:]])
+        seg_pos = torch.zeros(B, self.N_seg_token, 2).to(images.device).to(pos.dtype)
+        
         # update P because we added special tokens
         _, P, C = tokens.shape
 
         frame_idx = 0
         global_idx = 0
         output_list = []
+        seg_output_list = []
 
         for _ in range(self.aa_block_num):
             for attn_type in self.aa_order:
                 if attn_type == "frame":
-                    tokens, frame_idx, frame_intermediates = self._process_frame_attention(
-                        tokens, B, S, P, C, frame_idx, pos=pos
+                    # For now, do nothing to seg_token in frame attention
+                    # TODO: 1. self attention for seg_token with frame_blocks
+                    # TODO: 2. self attention for seg_token with frame_seg_blocks
+                    tokens, frame_idx, frame_intermediates, seg_token, frame_seg_intermediates = self._process_frame_attention(
+                        tokens, B, S, P, C, frame_idx, pos=pos, seg_token=seg_token
                     )
                 elif attn_type == "global":
-                    tokens, global_idx, global_intermediates = self._process_global_attention(
-                        tokens, B, S, P, C, global_idx, pos=pos
+                    tokens, global_idx, global_intermediates, seg_token, global_seg_intermediates = self._process_global_attention(
+                        tokens, B, S, P, C, global_idx, pos=pos, seg_token=seg_token, seg_pos=seg_pos,
                     )
                 else:
                     raise ValueError(f"Unknown attention type: {attn_type}")
@@ -261,12 +273,18 @@ class Aggregator(nn.Module):
                 # concat frame and global intermediates, [B x S x P x 2C]
                 concat_inter = torch.cat([frame_intermediates[i], global_intermediates[i]], dim=-1)
                 output_list.append(concat_inter)
+                # TODO: add frame_seg_intermediates later
+                seg_output_list.append(global_seg_intermediates[i])
         del concat_inter
         del frame_intermediates
         del global_intermediates
-        return output_list, self.patch_start_idx
+        del global_seg_intermediates
+        del frame_seg_intermediates
+        return output_list, self.patch_start_idx, seg_output_list
+    
+    
 
-    def _process_frame_attention(self, tokens, B, S, P, C, frame_idx, pos=None):
+    def _process_frame_attention(self, tokens, B, S, P, C, frame_idx, pos=None, seg_token=None):
         """
         Process frame attention blocks. We keep tokens in shape (B*S, P, C).
         """
@@ -278,6 +296,7 @@ class Aggregator(nn.Module):
             pos = pos.view(B, S, P, 2).view(B * S, P, 2)
 
         intermediates = []
+        seg_intermediates=[]
 
         # by default, self.aa_block_size=1, which processes one block at a time
         for _ in range(self.aa_block_size):
@@ -285,9 +304,9 @@ class Aggregator(nn.Module):
             frame_idx += 1
             intermediates.append(tokens.view(B, S, P, C))
 
-        return tokens, frame_idx, intermediates
+        return tokens, frame_idx, intermediates, seg_token, seg_intermediates
 
-    def _process_global_attention(self, tokens, B, S, P, C, global_idx, pos=None):
+    def _process_global_attention(self, tokens, B, S, P, C, global_idx, pos=None, seg_token=None, seg_pos=None):
         """
         Process global attention blocks. We keep tokens in shape (B, S*P, C).
         """
@@ -297,15 +316,32 @@ class Aggregator(nn.Module):
         if pos is not None and pos.shape != (B, S * P, 2):
             pos = pos.view(B, S, P, 2).view(B, S * P, 2)
 
+        # Add seg tokens and pos
+        has_seg = seg_token is not None and seg_pos is not None
+        N_seg_token = seg_token.shape[1]
+        
+        tokens = torch.cat([seg_token, tokens], dim=1) if has_seg else tokens
+        if pos is not None:
+            pos = torch.cat([seg_pos, pos], dim=1) if has_seg else pos
+
         intermediates = []
+        seg_intermediates = []
 
         # by default, self.aa_block_size=1, which processes one block at a time
         for _ in range(self.aa_block_size):
             tokens = self.global_blocks[global_idx](tokens, pos=pos)
             global_idx += 1
-            intermediates.append(tokens.view(B, S, P, C))
+            #intermediates.append(tokens.view(B, S, P, C))
+            if has_seg:
+                seg_token, other_token = tokens[:, :N_seg_token, :], tokens[:,N_seg_token:,:].view(B, S, P, C)
+                seg_intermediates.append(seg_token)         
+            else:
+                other_token = tokens
+            intermediates.append(other_token)
+        tokens = other_token
+        seg_intermediates = None if not has_seg else seg_intermediates
 
-        return tokens, global_idx, intermediates
+        return tokens, global_idx, intermediates, seg_token, seg_intermediates
 
 
 def slice_expand_and_flatten(token_tensor, B, S):
